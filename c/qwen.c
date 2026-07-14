@@ -198,16 +198,18 @@ static void rmsnorm(float *out, const float *x, const float *w, int D, float eps
     for(int i=0;i<D;i++) out[i]=x[i]*r*w[i];
 }
 
+#define Q8_SYM_MAX 127
+
 static void quantize_kv_row(const float *src, int8_t *dst, float *scale, int D){
     float am=0.f;
     for(int i=0;i<D;i++){ float a=fabsf(src[i]); if(a>am)am=a; }
     /* A unit scale for an all-zero row keeps the representation well-defined. */
-    *scale=am>0.f?am/127.f:1.f;
+    *scale=am>0.f?am/Q8_SYM_MAX:1.f;
     float inv_scale=1.f/ *scale;
     for(int i=0;i<D;i++){
         int q=(int)(src[i]*inv_scale+(src[i]>=0.f?0.5f:-0.5f));
         /* Clamp to a symmetric range around zero, avoiding int8's -128 edge. */
-        if(q>127)q=127; if(q<-127)q=-127;
+        if(q>Q8_SYM_MAX)q=Q8_SYM_MAX; if(q<-Q8_SYM_MAX)q=-Q8_SYM_MAX;
         dst[i]=(int8_t)q;
     }
 }
@@ -528,7 +530,10 @@ static void kv_alloc(Model *m, int max_t){
         m->V[i]=calloc((size_t)rows*c->head_dim,sizeof(int8_t));
         m->Ks[i]=falloc(rows);
         m->Vs[i]=falloc(rows);
-        if(!m->K[i]||!m->V[i]||!m->Ks[i]||!m->Vs[i]){fprintf(stderr,"OOM\n");exit(1);}
+        if(!m->K[i]||!m->V[i]||!m->Ks[i]||!m->Vs[i]){
+            fprintf(stderr,"Out of memory allocating KV cache for layer %d\n",i);
+            exit(1);
+        }
     }
 }
 
