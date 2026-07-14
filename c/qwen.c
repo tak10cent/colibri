@@ -685,7 +685,9 @@ static void run_serve(Model *m, const char *snap){
         else { logit=step(m,hist+hist_len-1,1,hist_len-1); }
         int prod=0; int cur=req_ngen;
         if(hist_len+cur+2>=maxctx) cur=maxctx-hist_len-2;
-        /* decode */
+        /* decode: free+NULL each logit immediately after sampling to prevent
+         * double-free — break paths skip the step() call so logit stays NULL,
+         * and free(NULL) at line 700 is a safe no-op. */
         while(cur>0){
             int t=pick_tok(logit,m->c.vocab); free(logit); logit=NULL;
             if(t==eos||is_stop(m,t)) break;
@@ -697,7 +699,7 @@ static void run_serve(Model *m, const char *snap){
             if(hist_len+2>=hist_cap) break;
             logit=step(m,&t,1,hist_len-1);
         }
-        free(logit); logit=NULL;
+        free(logit); logit=NULL; /* no-op if EOS/cap break already freed it */
         double tdt=now_s()-tt0; if(tdt<1e-6) tdt=1e-6;
         double dh=(double)(m->hits-h0), dm=(double)(m->miss-ms0);
         printf("\x01\x01" "END" "\x01\x01\n");
@@ -725,6 +727,7 @@ static void run_text(Model *m, const char *snap){
     fputs(prompt,stdout); fflush(stdout);
     kv_alloc(m,np+ngen+4);
     float *logit=step(m,pids,np,0);
+    /* free+NULL each logit immediately after sampling; free(NULL) is safe */
     for(int s=0;s<ngen;s++){
         int t=pick_tok(logit,m->c.vocab); free(logit); logit=NULL;
         if(t==eos||is_stop(m,t)) break;
@@ -732,7 +735,7 @@ static void run_text(Model *m, const char *snap){
         fputs(dec,stdout); fflush(stdout);
         logit=step(m,&t,1,np+s);
     }
-    free(logit); putchar('\n');
+    free(logit); putchar('\n'); /* no-op if EOS break already freed it */
     free(pids); kv_free(m);
 }
 

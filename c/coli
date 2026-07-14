@@ -365,7 +365,9 @@ def cmd_build(a):
     if not os.path.exists(os.path.join(HERE, "Makefile")):
         sys.exit(f"{C.yel}coli build{C.r} only works from a source checkout (this is an installed copy).\n"
                   f"  Clone https://github.com/JustVugg/colibri and run ./setup.sh, or make -C c glm.")
-    # Build both engines; ignore individual failures (qwen may be optional).
+    # Build both engines.  Both are attempted unconditionally so a qwen build
+    # failure does not mask a glm success (or vice versa); the exit code is
+    # non-zero if either engine fails.
     rc1 = subprocess.call(["make","-C",HERE,"glm"])
     rc2 = subprocess.call(["make","-C",HERE,"qwen"])
     sys.exit(rc1 or rc2)
@@ -640,7 +642,7 @@ def _is_qwen_repo(repo_or_dir: str, arch_flag: str) -> bool:
     if repo_or_dir:
         # HuggingFace repo IDs like Qwen/Qwen3.6-35B-A3B, Qwen/Qwen3-8B-A1B, etc.
         name = repo_or_dir.split("/")[-1]
-        if repo_or_dir.startswith("Qwen/") and re.search(r"\bA\d+", name):
+        if repo_or_dir.startswith("Qwen/") and re.search(r"\bA\d+B\b", name):
             return True
         # Local directory: check config.json model_type
         cfg_path = os.path.join(repo_or_dir, "config.json")

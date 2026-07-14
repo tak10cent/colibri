@@ -157,9 +157,8 @@ def convert_checkpoint(src_dir: Path, out_dir: Path, ebits: int, dry_run: bool) 
                 qs_path = out_dir / (safe_name + ".qs.safetensors")
                 save_file({name: q}, str(q_path))
                 save_file({name + ".qs": qs}, str(qs_path))
-                total_expert += 1
 
-        total_expert += sum(1 for _ in expert_pairs) if dry_run else 0
+        total_expert += len(expert_pairs)
 
     print(f"  done. {len(shards)} shards, {total_expert} expert tensors quantised.",
           file=sys.stderr)
