@@ -640,13 +640,14 @@ def _is_qwen_repo(repo_or_dir: str, arch_flag: str) -> bool:
     if repo_or_dir:
         # HuggingFace repo IDs like Qwen/Qwen3.6-35B-A3B, Qwen/Qwen3-8B-A1B, etc.
         name = repo_or_dir.split("/")[-1]
-        if repo_or_dir.startswith("Qwen/") and re.search(r"\bA\d", name):
+        if repo_or_dir.startswith("Qwen/") and re.search(r"\bA\d+", name):
             return True
         # Local directory: check config.json model_type
         cfg_path = os.path.join(repo_or_dir, "config.json")
         if os.path.isfile(cfg_path):
             try:
-                mt = json.load(open(cfg_path)).get("model_type", "")
+                with open(cfg_path) as f:
+                    mt = json.load(f).get("model_type", "")
                 if "qwen" in mt.lower() and "moe" in mt.lower():
                     return True
             except (OSError, json.JSONDecodeError):

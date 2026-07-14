@@ -526,14 +526,16 @@ static int pick_tok(const float *logits, int vocab){
     float m=-1e30f; for(int i=0;i<vocab;i++) if(logits[i]>m) m=logits[i];
     float s=0; for(int i=0;i<vocab;i++){p[i]=expf((logits[i]-m)/g_temp);s+=p[i];}
     for(int i=0;i<vocab;i++) p[i]/=s;
-    /* sort descending */
+    /* nucleus cutoff: partial selection sort (O(n*k), k<<n) */
     int *idx=malloc(vocab*sizeof(int)); for(int i=0;i<vocab;i++) idx[i]=i;
-    /* partial sort for nucleus (enough to cover top-p mass) */
-    for(int i=0;i<vocab;i++) for(int j=i+1;j<vocab;j++)
-        if(p[idx[j]]>p[idx[i]]){int t=idx[i];idx[i]=idx[j];idx[j]=t;}
-    /* nucleus cutoff */
     float cum=0; int k=0;
-    while(k<vocab && cum<g_nuc){ cum+=p[idx[k]]; k++; }
+    while(k<vocab && cum<g_nuc){
+        /* find max in remaining elements [k, vocab) */
+        int best=k;
+        for(int j=k+1;j<vocab;j++) if(p[idx[j]]>p[idx[best]]) best=j;
+        int tmp=idx[k]; idx[k]=idx[best]; idx[best]=tmp;
+        cum+=p[idx[k]]; k++;
+    }
     if(k<1) k=1;
     /* sample */
     float r=(float)rand()/RAND_MAX*cum;

@@ -1,10 +1,11 @@
 """Tests for Qwen3-MoE support: chat template, arch detection, config dispatch."""
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 
-from openai_server import (APIError, detect_arch, render_chat,
+from openai_server import (APIError, QWEN_ARCH_TYPES, detect_arch, render_chat,
                             render_chat_qwen, serve)
 
 
@@ -170,9 +171,31 @@ class ServeArchDispatchTest(unittest.TestCase):
         # serve() binds the port before starting the engine; a missing model
         # is discovered when the Engine constructor tries to spawn the process.
         # This tests that the port-bind path succeeds and we get an error from
-        # the engine, not from arch detection.
-        with self.assertRaises(Exception):
+        # the engine (subprocess.CalledProcessError or FileNotFoundError),
+        # not from arch detection.
+        with self.assertRaises((subprocess.CalledProcessError, FileNotFoundError,
+                                OSError, RuntimeError, SystemExit)):
             serve("/nonexistent/model/dir", kv_slots=1)
+
+
+class QwenArchTypesTest(unittest.TestCase):
+    """QWEN_ARCH_TYPES covers qwen3_moe, qwen2_moe, qwen_moe."""
+
+    def test_qwen3_moe_in_set(self):
+        self.assertIn("qwen3_moe", QWEN_ARCH_TYPES)
+
+    def test_qwen2_moe_in_set(self):
+        self.assertIn("qwen2_moe", QWEN_ARCH_TYPES)
+
+    def test_glm_not_in_set(self):
+        self.assertNotIn("glm_moe_dsa", QWEN_ARCH_TYPES)
+
+    def test_detect_arch_returns_qwen2_moe(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "config.json"), "w") as f:
+                json.dump({"model_type": "qwen2_moe"}, f)
+            arch = detect_arch(d)
+            self.assertIn(arch, QWEN_ARCH_TYPES)
 
 
 if __name__ == "__main__":

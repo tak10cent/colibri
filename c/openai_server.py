@@ -282,6 +282,9 @@ def parse_tool_calls(reply, tools=None):
         sys.stderr.flush()
     return text.strip(), calls
 
+# Qwen MoE model_type values that use the Qwen chat template.
+QWEN_ARCH_TYPES = frozenset({"qwen3_moe", "qwen2_moe", "qwen_moe"})
+
 
 def detect_arch(model_dir):
     """Return the model_type string from config.json, or 'glm_moe_dsa' as default."""
@@ -1139,7 +1142,7 @@ class APIHandler(BaseHTTPRequestHandler):
             raise APIError(400, "`enable_thinking` must be a boolean.", "enable_thinking")
         tools = body.get("tools") or body.get("functions") or None
         arch = self.server.arch
-        if arch == "qwen3_moe":
+        if arch in QWEN_ARCH_TYPES:
             prompt = render_chat_qwen(body.get("messages"), enable_thinking, tools,
                                       body.get("tool_choice"))
         else:
