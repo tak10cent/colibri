@@ -65,9 +65,31 @@ else:
     TOOLS = os.path.join(_LIBEXEC, "tools")
     sys.path.insert(0, _LIBEXEC)   # so `import resource_plan`, `doctor`, `openai_server` still resolve
 
+# Qwen engine (next to GLM in the same directory)
+QWEN = os.path.join(os.path.dirname(GLM), "qwen" + _EXE)
+
 DEF_MODEL = os.environ.get("COLI_MODEL", "/home/vincenzo/glm52_i4")
 END   = b"\x01\x01END\x01\x01\n"
 READY = b"\x01\x01READY\x01\x01\n"
+
+
+# ---------- architecture detection ----------
+def detect_arch(model):
+    """Return 'qwen3_moe' or 'glm_moe_dsa' (default) based on config.json model_type."""
+    cfg = os.path.join(model, "config.json")
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            return json.load(f).get("model_type", "glm_moe_dsa")
+    except (OSError, json.JSONDecodeError):
+        return "glm_moe_dsa"
+
+
+def engine_for(model):
+    """Return the engine binary path for this model directory."""
+    arch = detect_arch(model)
+    if arch == "qwen3_moe":
+        return QWEN
+    return GLM
 
 # ---------- palette & stile ----------
 def _c(n): return f"\033[38;5;{n}m"
@@ -137,7 +159,11 @@ def need_model(model):
         sys.exit(f"{C.yel}model not found:{C.r} {model}\n  set COLI_MODEL or use --model")
     if not os.path.exists(os.path.join(model,"tokenizer.json")):
         sys.exit(f"{C.yel}tokenizer.json is missing from {model}{C.r}")
-    if not os.path.exists(GLM):
+    eng = engine_for(model)
+    if not os.path.exists(eng):
+        arch = detect_arch(model)
+        if arch == "qwen3_moe":
+            sys.exit(f"{C.yel}qwen engine is not built.{C.r} Run: make -C {HERE} qwen")
         sys.exit(f"{C.yel}engine is not built.{C.r} Run: coli build")
 
 def cuda_binary():
@@ -339,7 +365,10 @@ def cmd_build(a):
     if not os.path.exists(os.path.join(HERE, "Makefile")):
         sys.exit(f"{C.yel}coli build{C.r} only works from a source checkout (this is an installed copy).\n"
                   f"  Clone https://github.com/JustVugg/colibri and run ./setup.sh, or make -C c glm.")
-    sys.exit(subprocess.call(["make","-C",HERE,"glm"]))
+    # Build both engines; ignore individual failures (qwen may be optional).
+    rc1 = subprocess.call(["make","-C",HERE,"glm"])
+    rc2 = subprocess.call(["make","-C",HERE,"qwen"])
+    sys.exit(rc1 or rc2)
 
 def cmd_info(a):
     banner("info")
@@ -349,7 +378,8 @@ def cmd_info(a):
         c=json.load(open(cfgp))
         row("model", a.model)
         row("arch", f"hidden {c.get('hidden_size')} · {c.get('num_hidden_layers')} layer · "
-                    f"{c.get('n_routed_experts')} expert/layer · top-{c.get('num_experts_per_tok')}")
+                    f"{c.get('n_routed_experts')} expert/layer · top-{c.get('num_experts_per_tok')} "
+                    f"· {c.get('model_type','glm_moe_dsa')}")
         sts=[x for x in os.listdir(a.model) if x.endswith('.safetensors')]
         sz=sum(os.path.getsize(os.path.join(a.model,x)) for x in sts)
         row("shards", f"{len(sts)} files · {sz/1e9:.0f} GB on disk")
@@ -366,7 +396,8 @@ def cmd_info(a):
         row("disk", f"{fs.free/1e9:.0f} GB free")
     except OSError:
         row("disk", "? GB (unavailable)")
-    row("engine", "ready ✓" if os.path.exists(GLM) else "not built (coli build)")
+    eng = engine_for(a.model) if os.path.isdir(a.model) else GLM
+    row("engine", f"ready ✓ ({os.path.basename(eng)})" if os.path.exists(eng) else "not built (coli build)")
     knobs=[]
     if a.ram: knobs.append(f"ram {a.ram}GB")
     if a.topp: knobs.append(f"topp {a.topp}")
@@ -411,15 +442,24 @@ def cmd_run(a):
     need_model(a.model)
     prompt=" ".join(a.prompt) if a.prompt else sys.exit('usage: coli run "your prompt"')
     banner("run")
-    # template ufficiale GLM-5.2: niente \n dopo i ruoli; <think></think> = risposta diretta (nothink)
-    e=env_for(a); e["PROMPT"]=f"[gMASK]<sop><|user|>{prompt}<|assistant|><think></think>"
-    sys.exit(subprocess.call([GLM, str(a.cap)], env=e))
+    e=env_for(a)
+    eng = engine_for(a.model)
+    arch = detect_arch(a.model)
+    if arch == "qwen3_moe":
+        e["PROMPT"] = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+    else:
+        # template ufficiale GLM-5.2: niente \n dopo i ruoli; <think></think> = risposta diretta (nothink)
+        e["PROMPT"]=f"[gMASK]<sop><|user|>{prompt}<|assistant|><think></think>"
+    sys.exit(subprocess.call([eng, str(a.cap)], env=e))
 
 def cmd_chat(a):
     need_model(a.model)
     banner(f"chat · {os.path.basename(a.model)} · ram {a.ram or '-'}GB · topp {a.topp or 'off'}")
     errlog=tempfile.NamedTemporaryFile(mode="w+", suffix=".log", delete=False)
     e=env_for(a); e["SERVE"]="1"
+    eng = engine_for(a.model)
+    arch = detect_arch(a.model)
+    model_label = "Qwen3" if arch == "qwen3_moe" else "744B"
     # stderr -> PIPE, NOT stderr=errlog (file). On Windows/MinGW, pointing the
     # child's stderr at a file/DEVNULL handle stalls the CRT so stdout (the byte
     # protocol coli reads one byte at a time) never flushes and chat hangs at
@@ -429,9 +469,9 @@ def cmd_chat(a):
     # once the READY sentinel arrives, so the status-line display below works
     # exactly as before. (Do NOT add a concurrent stderr drain thread: on
     # Windows, reading two child pipes simultaneously deadlocks CPython's IO.)
-    p=subprocess.Popen([GLM,str(a.cap)], env=e, stdin=subprocess.PIPE,
+    p=subprocess.Popen([eng,str(a.cap)], env=e, stdin=subprocess.PIPE,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
-    sp=Spinner("waking the giant (744B)…"); sp.start()
+    sp=Spinner(f"waking the giant ({model_label})…"); sp.start()
     st=stream_turn(p, READY, lambda b: None)
     sp.stop()
     if st is None:
@@ -546,8 +586,9 @@ def cmd_chat(a):
 def cmd_serve(a):
     need_model(a.model)
     from openai_server import serve
+    eng = engine_for(a.model)
     serve(a.model, a.host, a.port, a.model_id, a.api_key,
-          a.cap,a.ngen,GLM,env_for(a),a.cors_origin,
+          a.cap,a.ngen,eng,env_for(a),a.cors_origin,
           a.max_queue,a.queue_timeout,a.kv_slots)
 
 def cmd_web(a):
@@ -597,8 +638,15 @@ def cmd_convert(a):
     # python con torch/safetensors: l'ambiente del progetto se c'e', altrimenti quello corrente
     venv_py = os.path.join(HERE, "mio_env", "Scripts" if sys.platform == "win32" else "bin", "python3")
     py = venv_py if os.path.exists(venv_py) else sys.executable
+    # Dispatch to the right converter based on --repo / detected arch
+    repo = a.repo
+    if repo == "Qwen/Qwen3.6-35B-A3B" or getattr(a,"arch","") == "qwen":
+        cmd=[py, os.path.join(TOOLS,"convert_qwen.py"),
+             "--repo", repo, "--out", a.model, "--ebits", str(a.ebits)]
+        print(f"  {C.dim}converting Qwen model: {' '.join(cmd)}{C.r}")
+        sys.exit(subprocess.call(cmd))
     base=[py, os.path.join(TOOLS,"convert_fp8_to_int4.py"),
-          "--repo", a.repo, "--outdir", a.model, "--ebits", str(a.ebits), "--io-bits", str(a.io_bits)]
+          "--repo", repo, "--outdir", a.model, "--ebits", str(a.ebits), "--io-bits", str(a.io_bits)]
     if a.xbits: base+=["--xbits",str(a.xbits)]
     # passo 1: modello principale (78 layer). Resumabile: riparte dagli shard mancanti.
     print(f"  {C.dim}[1/2] model: {' '.join(base)}{C.r}")
@@ -657,6 +705,7 @@ def main():
     pc=sub.add_parser("convert", parents=[common]); pc.add_argument("--repo",default="zai-org/GLM-5.2-FP8")
     pc.add_argument("--ebits",type=int,default=4); pc.add_argument("--io-bits",type=int,default=8); pc.add_argument("--xbits",type=int,default=0)
     pc.add_argument("--no-mtp",action="store_true",help="skip the MTP head (no speculative drafts)")
+    pc.add_argument("--arch",choices=("glm","qwen"),default="",help="force architecture (auto-detected by default)")
     a=ap.parse_args()
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"doctor":cmd_doctor,
              "run":cmd_run,"chat":cmd_chat,"serve":cmd_serve,"bench":cmd_bench,

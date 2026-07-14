@@ -283,6 +283,106 @@ def parse_tool_calls(reply, tools=None):
     return text.strip(), calls
 
 
+def detect_arch(model_dir):
+    """Return the model_type string from config.json, or 'glm_moe_dsa' as default."""
+    if not model_dir:
+        return "glm_moe_dsa"
+    cfg_path = os.path.join(model_dir, "config.json")
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg.get("model_type", "glm_moe_dsa")
+    except (OSError, json.JSONDecodeError, KeyError):
+        return "glm_moe_dsa"
+
+
+# ---- Qwen3-MoE chat template (<|im_start|>/<|im_end|> format) --------------------------------
+# Matches the official Qwen3 Jinja template.  Thinking is enabled with
+# <think> prefix (the model keeps its reasoning inside <think>...</think> tags).
+# Qwen3 does NOT use GLM's [gMASK]<sop> framing or <|user|>/<|assistant|> markers.
+
+def render_chat_qwen(messages, enable_thinking=False, tools=None, tool_choice=None):
+    """Render the text-only subset of the official Qwen3 chat template.
+
+    Vision inputs (image/audio) are not supported by this text-only runtime;
+    a 400 error is raised if non-text content parts are detected.
+    """
+    if not isinstance(messages, list) or not messages:
+        raise APIError(400, "`messages` must be a non-empty array.", "messages")
+
+    forced = None
+    if isinstance(tool_choice, dict):
+        forced = ((tool_choice.get("function") or {}).get("name") or tool_choice.get("name"))
+        if forced:
+            tools = [t for t in (tools or [])
+                     if ((t.get("function", t) if isinstance(t, dict) else {}).get("name") == forced)]
+    elif tool_choice == "none":
+        tools = None
+
+    prompt = []
+    if tools:
+        # Qwen3 tool preamble (matches official chat_template.jinja).
+        prompt.append("<|im_start|>system\nYou are a helpful assistant.\n\n"
+                      "# Tools\n\nYou may call one or more functions to assist with the user "
+                      "query.\n\nYou are provided with function signatures within <tools></tools> "
+                      "XML tags:\n<tools>\n")
+        for tool in tools:
+            fn = tool.get("function", tool) if isinstance(tool, dict) else {}
+            clean = {k: v for k, v in fn.items() if k not in ("defer_loading", "strict")}
+            prompt.append(json.dumps(clean, ensure_ascii=False) + "\n")
+        prompt.append("</tools>\n\nFor each function call, return a json object with function name "
+                      "and arguments within <tool_call></tool_call> XML tags as follows:\n"
+                      "<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-dict>}\n"
+                      "</tool_call>")
+        if forced:
+            prompt.append(f"\n\nYou must call the function `{forced}`. Do not answer directly.")
+        elif tool_choice == "required":
+            prompt.append("\n\nYou must call one of the functions above. Do not answer directly.")
+        prompt.append("<|im_end|>\n")
+
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            raise APIError(400, "Each message must be an object.", f"messages.{index}")
+        role = message.get("role")
+        if role in ("system", "developer"):
+            text = content_text(message.get("content"), f"messages.{index}.content")
+            prompt.append(f"<|im_start|>system\n{text}<|im_end|>\n")
+        elif role == "user":
+            text = content_text(message.get("content"), f"messages.{index}.content")
+            prompt.append(f"<|im_start|>user\n{text}<|im_end|>\n")
+        elif role == "assistant":
+            raw = message.get("content")
+            text = content_text(raw, f"messages.{index}.content") if raw is not None else ""
+            # Tool calls are embedded as JSON inside <tool_call> tags.
+            tc_parts = []
+            for tc in (message.get("tool_calls") or []):
+                fn = tc.get("function", tc) if isinstance(tc, dict) else {}
+                args = fn.get("arguments", "{}")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                tc_parts.append("<tool_call>\n" +
+                                json.dumps({"name": fn.get("name", ""), "arguments": args},
+                                           ensure_ascii=False) + "\n</tool_call>")
+            body = text.strip() + ("".join(tc_parts))
+            prompt.append(f"<|im_start|>assistant\n{body}<|im_end|>\n")
+        elif role == "tool":
+            result = content_text(message.get("content"), f"messages.{index}.content")
+            prompt.append(f"<|im_start|>tool\n{result}<|im_end|>\n")
+        else:
+            raise APIError(400, f"Unsupported message role: {role!r}.",
+                           f"messages.{index}.role", "unsupported_role")
+
+    # Final assistant prefix.
+    if enable_thinking:
+        prompt.append("<|im_start|>assistant\n<think>\n")
+    else:
+        prompt.append("<|im_start|>assistant\n")
+    return "".join(prompt)
+
+
 def render_chat(messages, enable_thinking=False, reasoning_effort=None, tools=None,
                 tool_choice=None):
     """Render the text-only subset of the official GLM-5.2 chat template."""
@@ -650,7 +750,7 @@ class APIServer(ThreadingHTTPServer):
 
     def __init__(self, address, engine, model_id, api_key=None, max_tokens=1024,
                  cors_origins=DEFAULT_CORS_ORIGINS, max_queue=8, queue_timeout=300,
-                 kv_slots=1):
+                 kv_slots=1, arch="glm_moe_dsa"):
         super().__init__(address, APIHandler)
         self.engine = engine
         self.model_id = model_id
@@ -660,6 +760,7 @@ class APIServer(ThreadingHTTPServer):
         self.kv_slots = kv_slots
         self.cors_origins = tuple(cors_origins)
         self.created = int(time.time())
+        self.arch = arch  # "glm_moe_dsa" or "qwen3_moe"
 
 
 class APIHandler(BaseHTTPRequestHandler):
@@ -1037,8 +1138,13 @@ class APIHandler(BaseHTTPRequestHandler):
         if not isinstance(enable_thinking, bool):
             raise APIError(400, "`enable_thinking` must be a boolean.", "enable_thinking")
         tools = body.get("tools") or body.get("functions") or None
-        prompt = render_chat(body.get("messages"), enable_thinking, reasoning_effort, tools,
-                             body.get("tool_choice"))
+        arch = getattr(self.server, "arch", "glm_moe_dsa")
+        if arch == "qwen3_moe":
+            prompt = render_chat_qwen(body.get("messages"), enable_thinking, tools,
+                                      body.get("tool_choice"))
+        else:
+            prompt = render_chat(body.get("messages"), enable_thinking, reasoning_effort, tools,
+                                 body.get("tool_choice"))
         self.generation(body, prompt, request_id, True)
 
     def completion(self, body, request_id):
@@ -1064,10 +1170,11 @@ def serve(model, host="127.0.0.1", port=8000, model_id="glm-5.2-colibri", api_ke
     if host not in ("127.0.0.1", "localhost", "::1") and not api_key:
         print("WARNING: API is listening beyond localhost without COLI_API_KEY", file=sys.stderr)
     origins = DEFAULT_CORS_ORIGINS if cors_origins is None else tuple(cors_origins)
-    # Bind before starting the 744B engine. A stale/occupied port must fail in
+    arch = detect_arch(model)
+    # Bind before starting the engine. A stale/occupied port must fail in
     # milliseconds rather than loading hundreds of GB and leaking a child.
     server = APIServer((host, port), None, model_id, api_key, max_tokens, origins,
-                       max_queue, queue_timeout, kv_slots)
+                       max_queue, queue_timeout, kv_slots, arch=arch)
     runtime = None
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     try:

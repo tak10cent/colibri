@@ -201,6 +201,9 @@ cuda-bench: backend_cuda.cu backend_cuda.h tests/bench_tensor_core.cu
 olmoe$(EXE): olmoe.c st.h json.h compat.h
 	$(CC) $(CFLAGS) olmoe.c -o olmoe$(EXE) $(LDFLAGS)
 
+qwen$(EXE): qwen.c st.h json.h tok.h tok_unicode.h compat.h
+	$(CC) $(CFLAGS) qwen.c -o qwen$(EXE) $(LDFLAGS)
+
 # binario portabile da distribuire su altre macchine x86-64
 portable:
 	$(MAKE) glm$(EXE) ARCH=x86-64-v3
@@ -246,13 +249,14 @@ check:
 	$(MAKE) portable
 	$(MAKE) test
 
-install: glm$(EXE) olmoe$(EXE)
+install: glm$(EXE) olmoe$(EXE) qwen$(EXE)
 	$(INSTALL) -d $(DESTDIR)$(BINDIR)
 	$(INSTALL) -d $(DESTDIR)$(LIBEXECDIR)
 	$(INSTALL) -d $(DESTDIR)$(LIBEXECDIR)/tools
 	$(INSTALL) -m 755 coli $(DESTDIR)$(BINDIR)/coli
 	$(INSTALL) -m 755 glm$(EXE) $(DESTDIR)$(LIBEXECDIR)/glm$(EXE)
 	$(INSTALL) -m 755 olmoe$(EXE) $(DESTDIR)$(LIBEXECDIR)/olmoe$(EXE)
+	$(INSTALL) -m 755 qwen$(EXE) $(DESTDIR)$(LIBEXECDIR)/qwen$(EXE)
 	$(INSTALL) -m 644 resource_plan.py doctor.py openai_server.py $(DESTDIR)$(LIBEXECDIR)/
 	$(INSTALL) -m 644 tools/*.py $(DESTDIR)$(LIBEXECDIR)/tools/
 

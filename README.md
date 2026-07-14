@@ -575,27 +575,98 @@ colibrì is a one-person project, written and tested entirely on a 12-core lapto
 
 Every contribution, from a datapoint to a disk, moves the ceiling.
 
+## Qwen/Qwen3.6-35B-A3B support
+
+colibrì supports **[Qwen/Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)** as a second first-class runtime alongside GLM-5.2.
+Architecture auto-detection is automatic: `coli` reads `model_type` from `config.json` and picks the right engine.
+
+### Architecture summary
+
+| aspect | GLM-5.2 | Qwen3.6-35B-A3B |
+|---|---|---|
+| attention | MLA (q/kv LoRA, compressed KV) | Standard GQA (n_kv_heads=8) |
+| router | Sigmoid + group constraint | Softmax + norm_topk_prob |
+| experts | 256 per layer | 128 per layer |
+| shared expert | multiple (`shared_experts`) | single (`shared_expert`) |
+| RoPE θ | ~10,000 | ~1,000,000 |
+| chat template | `[gMASK]<sop><\|user\|>…` | `<\|im_start\|>user\n…<\|im_end\|>` |
+| speculative MTP | yes (layer 78) | no |
+| vision input | no | no (text-only in colibrì) |
+
+Because the two architectures are fundamentally different (MLA vs GQA, different tensor names, different routers, different chat templates), Qwen3.6-35B-A3B uses a dedicated `qwen.c` engine. The GLM-5.2 path is entirely unchanged.
+
+### Resource expectations
+
+| metric | value |
+|---|---|
+| active parameters / token | ~4B (3 routed + 1 shared) |
+| expert storage (int8) | ~60 GB |
+| dense storage (bf16) | ~6 GB |
+| resident RAM (dense part) | ~6–8 GB |
+| peak RSS during chat | ~12–16 GB (auto-capped) |
+| context window | 128k tokens |
+
+### Conversion and setup
+
+```bash
+cd c
+# Conversion needs: pip install torch safetensors huggingface_hub
+./coli convert --arch qwen3_moe --model /nvme/qwen36 --repo Qwen/Qwen3.6-35B-A3B
+
+# Dry-run first to check disk space:
+./coli convert --arch qwen3_moe --model /nvme/qwen36 --repo Qwen/Qwen3.6-35B-A3B --dry-run
+```
+
+The converter downloads shards from Hugging Face one at a time, quantizes expert weights to int8 (per-row scales stored alongside as `.qs` files), keeps dense weights in bfloat16, and copies metadata (`config.json`, `tokenizer.json`, etc.). Resumable — re-run the same command to continue after interruption.
+
+### Invocation examples
+
+```bash
+# interactive chat
+COLI_MODEL=/nvme/qwen36 ./coli chat
+
+# single prompt
+COLI_MODEL=/nvme/qwen36 ./coli run "Explain mixture-of-experts routing"
+
+# OpenAI-compatible API server
+COLI_MODEL=/nvme/qwen36 ./coli serve
+
+# show model info and auto-detected architecture
+COLI_MODEL=/nvme/qwen36 ./coli info
+```
+
+Architecture detection is automatic: no extra flag is required. The `coli` CLI reads `config.json`, sees `model_type: qwen3_moe`, and starts the `qwen` engine. Any model directory that does not match a known Qwen type falls back to the `glm` engine — existing GLM-5.2 workflows are unaffected.
+
+### Known limitations
+
+- **Text only.** Qwen3.6-35B-A3B has multimodal capabilities in the upstream release, but colibrì is a text-only runtime. Image/audio inputs are rejected with an error message.
+- **No MTP speculative decoding.** The Qwen3-MoE architecture has no MTP head; MTP is GLM-5.2-specific.
+- **No CUDA expert tier.** The CUDA backend currently exists only for GLM-5.2 experts. Qwen experts run CPU-only.
+- **No DSA sparse attention.** DSA is a GLM-5.2-specific indexer; Qwen uses standard GQA attention.
+- **KV persistence** works across turns within a server session but does not persist to disk (GLM-5.2's `.coli_kv` disk persistence is GLM-specific).
+- The `enable_thinking` flag in the Qwen chat template adds `<think>` to the assistant prefix; the model must close it with `</think>` before its response.
+
 ## Repo layout
 
 ```
 Makefile                  root build/check entry point
 c/
 ├── glm.c                 single-file GLM engine
+├── qwen.c                Qwen3-MoE engine (GQA + softmax router + shared expert)
 ├── st.h, tok.h, json.h   runtime headers
-├── backend_cuda.*        optional CUDA tier
+├── backend_cuda.*        optional CUDA tier (GLM-5.2 only)
 ├── Makefile              build and local checks
-├── coli                  user-facing CLI
+├── coli                  user-facing CLI (auto-detects arch from config.json)
 ├── openai_server.py      OpenAI-compatible HTTP gateway
 ├── setup.sh              one-command local setup
 ├── tools/                offline conversion, fixtures and benchmarks
+│   └── convert_qwen.py   Qwen3-MoE download + int8 converter
 ├── scripts/              long-running conversion helpers
 └── tests/                dependency-free C and Python tests
 web/                      browser UI (pure OpenAI-API client, community-maintained)
 ```
 
-The runtime path intentionally stays flat and readable: `glm.c` plus its small
-headers. Auxiliary Python and shell tooling is grouped separately and is never a
-runtime dependency of the engine.
+The runtime path intentionally stays flat and readable: one C file per architecture (`glm.c`, `qwen.c`) plus small shared headers. Auxiliary Python and shell tooling is grouped separately and is never a runtime dependency of the engine.
 
 From the repository root, `make`, `make check`, and `make clean` delegate to the
 engine Makefile. Existing commands run from `c/` continue to work unchanged.
