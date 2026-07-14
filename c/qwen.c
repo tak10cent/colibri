@@ -205,6 +205,7 @@ static void quantize_kv_row(const float *src, int8_t *dst, float *scale, int D){
     float inv_scale=1.f/ *scale;
     for(int i=0;i<D;i++){
         int q=(int)lrintf(src[i]*inv_scale);
+        /* Reserve -128 so zero remains exactly centered in the int8 range. */
         if(q>127)q=127; if(q<-127)q=-127;
         dst[i]=(int8_t)q;
     }
@@ -522,11 +523,11 @@ static void kv_alloc(Model *m, int max_t){
     m->Vs=calloc(c->n_layers,sizeof(float*));
     for(int i=0;i<c->n_layers;i++){
         int64_t rows=(int64_t)c->n_kv_heads*max_t;
-        m->K[i]=calloc((size_t)rows,c->head_dim);
-        m->V[i]=calloc((size_t)rows,c->head_dim);
+        m->K[i]=calloc((size_t)rows*c->head_dim,sizeof(int8_t));
+        m->V[i]=calloc((size_t)rows*c->head_dim,sizeof(int8_t));
         m->Ks[i]=falloc(rows);
         m->Vs[i]=falloc(rows);
-        if(!m->K[i]||!m->V[i]){fprintf(stderr,"OOM\n");exit(1);}
+        if(!m->K[i]||!m->V[i]||!m->Ks[i]||!m->Vs[i]){fprintf(stderr,"OOM\n");exit(1);}
     }
 }
 
