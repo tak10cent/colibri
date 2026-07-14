@@ -633,6 +633,27 @@ def cmd_bench(a):
     print(f"  {C.dim}decode is disk-bound: this takes HOURS on slow hardware. Raise --limit on faster machines.{C.r}\n")
     sys.exit(subprocess.call(cmd, env=e))
 
+def _is_qwen_repo(repo_or_dir: str, arch_flag: str) -> bool:
+    """Return True if the conversion target is a Qwen3-MoE model."""
+    if arch_flag == "qwen":
+        return True
+    if repo_or_dir:
+        # HuggingFace repo IDs like Qwen/Qwen3.6-35B-A3B, Qwen/Qwen3-8B-A1B, etc.
+        name = repo_or_dir.split("/")[-1]
+        if repo_or_dir.startswith("Qwen/") and re.search(r"\bA\d", name):
+            return True
+        # Local directory: check config.json model_type
+        cfg_path = os.path.join(repo_or_dir, "config.json")
+        if os.path.isfile(cfg_path):
+            try:
+                mt = json.load(open(cfg_path)).get("model_type", "")
+                if "qwen" in mt.lower() and "moe" in mt.lower():
+                    return True
+            except (OSError, json.JSONDecodeError):
+                pass
+    return False
+
+
 def cmd_convert(a):
     banner("convert")
     # python con torch/safetensors: l'ambiente del progetto se c'e', altrimenti quello corrente
@@ -640,9 +661,14 @@ def cmd_convert(a):
     py = venv_py if os.path.exists(venv_py) else sys.executable
     # Dispatch to the right converter based on --repo / detected arch
     repo = a.repo
-    if repo == "Qwen/Qwen3.6-35B-A3B" or getattr(a,"arch","") == "qwen":
-        cmd=[py, os.path.join(TOOLS,"convert_qwen.py"),
-             "--repo", repo, "--out", a.model, "--ebits", str(a.ebits)]
+    if _is_qwen_repo(repo, getattr(a, "arch", "")):
+        # Use --model for local directories, --repo for HF repo IDs.
+        if os.path.isdir(repo):
+            src_arg = ["--model", repo]
+        else:
+            src_arg = ["--repo", repo]
+        cmd=[py, os.path.join(TOOLS,"convert_qwen.py")] + src_arg + \
+            ["--out", a.model, "--ebits", str(a.ebits)]
         print(f"  {C.dim}converting Qwen model: {' '.join(cmd)}{C.r}")
         sys.exit(subprocess.call(cmd))
     base=[py, os.path.join(TOOLS,"convert_fp8_to_int4.py"),

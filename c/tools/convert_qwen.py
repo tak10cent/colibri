@@ -95,10 +95,6 @@ def convert_shard(src: dict[str, torch.Tensor], ebits: int, dry_run: bool):
             if ebits == 8:
                 q, qs = quantize_row(w2d)
                 expert_pairs.append((name, q, qs))
-            else:
-                # For ebits < 8 fall back to int8 (caller should pass 8 for Qwen).
-                q, qs = quantize_row(w2d)
-                expert_pairs.append((name, q, qs))
         else:
             if not dry_run:
                 # Keep dense tensors in bf16 to save disk space while preserving range.
@@ -203,13 +199,13 @@ def main() -> None:
     ap.add_argument("--out", required=True, metavar="DIR",
                     help="Output directory for the converted model")
     ap.add_argument("--ebits", type=int, default=8,
-                    help="Expert quantisation bits: 8 (int8, default) or 4 (int4, experimental)")
+                    help="Expert quantisation bits (only 8 / int8 is currently supported)")
     ap.add_argument("--dry-run", action="store_true",
                     help="Scan tensors and report what would be converted, without writing files")
     args = ap.parse_args()
 
-    if args.ebits not in (4, 8):
-        ap.error("--ebits must be 4 or 8")
+    if args.ebits != 8:
+        ap.error("--ebits: only 8 (int8) is currently supported")
 
     out_dir = Path(args.out)
 

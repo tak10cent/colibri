@@ -387,7 +387,6 @@ static void attention(Model *m, Layer *l, int layer,
             memcpy(m->V[layer]+((int64_t)hh*m->max_t+t)*hd, vs+hh*hd, hd*sizeof(float));
         }
     }
-    int Tk=pos_base+S;
     float scale=1.f/sqrtf((float)hd);
     /* per-thread score scratch: one buffer of max_t floats per thread */
     int nthreads=omp_get_max_threads();
@@ -401,7 +400,6 @@ static void attention(Model *m, Layer *l, int layer,
             int qpos=pos_base+s;
             const float *qv=q+(int64_t)s*Qd+hh*hd;
             float *sc=sc_bufs[omp_get_thread_num()];
-            (void)Tk;
             for(int t=0;t<=qpos;t++){
                 const float *kv=m->K[layer]+((int64_t)kvh*m->max_t+t)*hd;
                 float a=0; for(int dd=0;dd<hd;dd++) a+=qv[dd]*kv[dd];
@@ -687,7 +685,7 @@ static void run_serve(Model *m, const char *snap){
         if(hist_len+cur+2>=maxctx) cur=maxctx-hist_len-2;
         /* decode */
         while(cur>0){
-            int t=pick_tok(logit,m->c.vocab); free(logit);
+            int t=pick_tok(logit,m->c.vocab); free(logit); logit=NULL;
             if(t==eos||is_stop(m,t)) break;
             /* emit token bytes */
             char dec[64]; int dn=tok_decode(&T,&t,1,dec,63); dec[dn]=0;
@@ -697,7 +695,7 @@ static void run_serve(Model *m, const char *snap){
             if(hist_len+2>=hist_cap) break;
             logit=step(m,&t,1,hist_len-1);
         }
-        free(logit);
+        free(logit); logit=NULL;
         double tdt=now_s()-tt0; if(tdt<1e-6) tdt=1e-6;
         double dh=(double)(m->hits-h0), dm=(double)(m->miss-ms0);
         printf("\x01\x01" "END" "\x01\x01\n");
@@ -726,7 +724,7 @@ static void run_text(Model *m, const char *snap){
     kv_alloc(m,np+ngen+4);
     float *logit=step(m,pids,np,0);
     for(int s=0;s<ngen;s++){
-        int t=pick_tok(logit,m->c.vocab); free(logit);
+        int t=pick_tok(logit,m->c.vocab); free(logit); logit=NULL;
         if(t==eos||is_stop(m,t)) break;
         char dec[64]; int dn=tok_decode(&T,&t,1,dec,63); dec[dn]=0;
         fputs(dec,stdout); fflush(stdout);

@@ -317,7 +317,7 @@ def render_chat_qwen(messages, enable_thinking=False, tools=None, tool_choice=No
             tools = [t for t in (tools or [])
                      if ((t.get("function", t) if isinstance(t, dict) else {}).get("name") == forced)]
     elif tool_choice == "none":
-        tools = None
+        tools = None  # explicitly suppress tool rendering even if tools were provided
 
     prompt = []
     if tools:
@@ -1138,7 +1138,7 @@ class APIHandler(BaseHTTPRequestHandler):
         if not isinstance(enable_thinking, bool):
             raise APIError(400, "`enable_thinking` must be a boolean.", "enable_thinking")
         tools = body.get("tools") or body.get("functions") or None
-        arch = getattr(self.server, "arch", "glm_moe_dsa")
+        arch = self.server.arch
         if arch == "qwen3_moe":
             prompt = render_chat_qwen(body.get("messages"), enable_thinking, tools,
                                       body.get("tool_choice"))

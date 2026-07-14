@@ -611,10 +611,10 @@ Because the two architectures are fundamentally different (MLA vs GQA, different
 ```bash
 cd c
 # Conversion needs: pip install torch safetensors huggingface_hub
-./coli convert --arch qwen3_moe --model /nvme/qwen36 --repo Qwen/Qwen3.6-35B-A3B
+./coli convert --arch qwen --model /nvme/qwen36 --repo Qwen/Qwen3.6-35B-A3B
 
 # Dry-run first to check disk space:
-./coli convert --arch qwen3_moe --model /nvme/qwen36 --repo Qwen/Qwen3.6-35B-A3B --dry-run
+./coli convert --arch qwen --model /nvme/qwen36 --repo Qwen/Qwen3.6-35B-A3B --dry-run
 ```
 
 The converter downloads shards from Hugging Face one at a time, quantizes expert weights to int8 (per-row scales stored alongside as `.qs` files), keeps dense weights in bfloat16, and copies metadata (`config.json`, `tokenizer.json`, etc.). Resumable — re-run the same command to continue after interruption.
