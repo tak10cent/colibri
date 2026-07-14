@@ -201,11 +201,12 @@ static void rmsnorm(float *out, const float *x, const float *w, int D, float eps
 static void quantize_kv_row(const float *src, int8_t *dst, float *scale, int D){
     float am=0.f;
     for(int i=0;i<D;i++){ float a=fabsf(src[i]); if(a>am)am=a; }
+    /* A unit scale for an all-zero row keeps the representation well-defined. */
     *scale=am>0.f?am/127.f:1.f;
     float inv_scale=1.f/ *scale;
     for(int i=0;i<D;i++){
-        int q=(int)lrintf(src[i]*inv_scale);
-        /* Reserve -128 so zero remains exactly centered in the int8 range. */
+        int q=(int)(src[i]*inv_scale+(src[i]>=0.f?0.5f:-0.5f));
+        /* Clamp to a symmetric range around zero, avoiding int8's -128 edge. */
         if(q>127)q=127; if(q<-127)q=-127;
         dst[i]=(int8_t)q;
     }
