@@ -102,8 +102,11 @@ typedef struct {
     Layer *L;
     LCache *cache;
     uint64_t clock, hits, miss;
-    /* KV cache: [n_kv_heads, max_t, head_dim] per layer */
-    float **K, **V;
+    /* Int8 KV cache: [n_kv_heads, max_t, head_dim] per layer.  Each
+     * head/token row has its own symmetric scale, keeping the scale overhead
+     * small while avoiding a range-sharing loss across heads or positions. */
+    int8_t **K, **V;
+    float **Ks, **Vs;
     int kv_len, max_t;
     double t_load;
 } Model;
@@ -193,6 +196,17 @@ static void rmsnorm(float *out, const float *x, const float *w, int D, float eps
     double ms=0; for(int i=0;i<D;i++) ms+=(double)x[i]*x[i];
     float r=1.f/sqrtf((float)(ms/D)+eps);
     for(int i=0;i<D;i++) out[i]=x[i]*r*w[i];
+}
+
+static void quantize_kv_row(const float *src, int8_t *dst, float *scale, int D){
+    float am=0.f;
+    for(int i=0;i<D;i++){ float a=fabsf(src[i]); if(a>am)am=a; }
+    *scale=am>0.f?am/127.f:1.f;
+    for(int i=0;i<D;i++){
+        int q=(int)lrintf(src[i]/ *scale);
+        if(q>127)q=127; if(q<-128)q=-128;
+        dst[i]=(int8_t)q;
+    }
 }
 
 static void softmax(float *x, int n){
@@ -377,14 +391,16 @@ static void attention(Model *m, Layer *l, int layer,
             rope_head(ks+hh*hd, pos, hd, c->theta);
         }
     }
-    /* write into KV cache */
+    /* Quantize each K/V head and token independently. */
     for(int s=0;s<S;s++){
         int t=pos_base+s;
         float *ks=k+(int64_t)s*Kd;
         float *vs=v+(int64_t)s*Kd;
         for(int hh=0;hh<Hkv;hh++){
-            memcpy(m->K[layer]+((int64_t)hh*m->max_t+t)*hd, ks+hh*hd, hd*sizeof(float));
-            memcpy(m->V[layer]+((int64_t)hh*m->max_t+t)*hd, vs+hh*hd, hd*sizeof(float));
+            int8_t *kd=m->K[layer]+((int64_t)hh*m->max_t+t)*hd;
+            int8_t *vd=m->V[layer]+((int64_t)hh*m->max_t+t)*hd;
+            quantize_kv_row(ks+hh*hd,kd,&m->Ks[layer][(int64_t)hh*m->max_t+t],hd);
+            quantize_kv_row(vs+hh*hd,vd,&m->Vs[layer][(int64_t)hh*m->max_t+t],hd);
         }
     }
     float scale=1.f/sqrtf((float)hd);
@@ -401,16 +417,18 @@ static void attention(Model *m, Layer *l, int layer,
             const float *qv=q+(int64_t)s*Qd+hh*hd;
             float *sc=sc_bufs[omp_get_thread_num()];
             for(int t=0;t<=qpos;t++){
-                const float *kv=m->K[layer]+((int64_t)kvh*m->max_t+t)*hd;
-                float a=0; for(int dd=0;dd<hd;dd++) a+=qv[dd]*kv[dd];
+                const int8_t *kv=m->K[layer]+((int64_t)kvh*m->max_t+t)*hd;
+                float kscale=m->Ks[layer][(int64_t)kvh*m->max_t+t];
+                float a=0; for(int dd=0;dd<hd;dd++) a+=qv[dd]*(float)kv[dd]*kscale;
                 sc[t]=a*scale;
             }
             softmax(sc,qpos+1);
             float *cx=ctx+(int64_t)s*Qd+hh*hd;
             memset(cx,0,hd*sizeof(float));
             for(int t=0;t<=qpos;t++){
-                const float *vv=m->V[layer]+((int64_t)kvh*m->max_t+t)*hd;
-                float a=sc[t]; for(int dd=0;dd<hd;dd++) cx[dd]+=a*vv[dd];
+                const int8_t *vv=m->V[layer]+((int64_t)kvh*m->max_t+t)*hd;
+                float vscale=m->Vs[layer][(int64_t)kvh*m->max_t+t];
+                float a=sc[t]*vscale; for(int dd=0;dd<hd;dd++) cx[dd]+=a*(float)vv[dd];
             }
         }
     }
@@ -497,11 +515,17 @@ static float *step(Model *m, const int *ids, int S, int pos_base){
 /* ---- KV cache allocation ---- */
 static void kv_alloc(Model *m, int max_t){
     Cfg *c=&m->c; m->max_t=max_t;
-    m->K=calloc(c->n_layers,sizeof(float*));
-    m->V=calloc(c->n_layers,sizeof(float*));
+    m->K=calloc(c->n_layers,sizeof(int8_t*));
+    m->V=calloc(c->n_layers,sizeof(int8_t*));
+    m->Ks=calloc(c->n_layers,sizeof(float*));
+    m->Vs=calloc(c->n_layers,sizeof(float*));
     for(int i=0;i<c->n_layers;i++){
-        m->K[i]=falloc((int64_t)c->n_kv_heads*max_t*c->head_dim);
-        m->V[i]=falloc((int64_t)c->n_kv_heads*max_t*c->head_dim);
+        int64_t rows=(int64_t)c->n_kv_heads*max_t;
+        m->K[i]=malloc((size_t)rows*c->head_dim);
+        m->V[i]=malloc((size_t)rows*c->head_dim);
+        m->Ks[i]=falloc(rows);
+        m->Vs[i]=falloc(rows);
+        if(!m->K[i]||!m->V[i]){fprintf(stderr,"OOM\n");exit(1);}
     }
 }
 
@@ -509,6 +533,8 @@ static void kv_free(Model *m){
     Cfg *c=&m->c;
     if(m->K){ for(int i=0;i<c->n_layers;i++) free(m->K[i]); free(m->K); m->K=NULL; }
     if(m->V){ for(int i=0;i<c->n_layers;i++) free(m->V[i]); free(m->V); m->V=NULL; }
+    if(m->Ks){ for(int i=0;i<c->n_layers;i++) free(m->Ks[i]); free(m->Ks); m->Ks=NULL; }
+    if(m->Vs){ for(int i=0;i<c->n_layers;i++) free(m->Vs[i]); free(m->Vs); m->Vs=NULL; }
     m->kv_len=0; m->max_t=0;
 }
 
@@ -575,8 +601,10 @@ static void run_score(Model *m, const char *snap){
         if(n<2){printf("0.0\n");fflush(stdout);free(ids);continue;}
         /* clear KV */
         for(int i=0;i<m->c.n_layers;i++){
-            memset(m->K[i],0,(int64_t)m->c.n_kv_heads*m->max_t*m->c.head_dim*sizeof(float));
-            memset(m->V[i],0,(int64_t)m->c.n_kv_heads*m->max_t*m->c.head_dim*sizeof(float));
+            memset(m->K[i],0,(int64_t)m->c.n_kv_heads*m->max_t*m->c.head_dim*sizeof(int8_t));
+            memset(m->V[i],0,(int64_t)m->c.n_kv_heads*m->max_t*m->c.head_dim*sizeof(int8_t));
+            memset(m->Ks[i],0,(int64_t)m->c.n_kv_heads*m->max_t*sizeof(float));
+            memset(m->Vs[i],0,(int64_t)m->c.n_kv_heads*m->max_t*sizeof(float));
         }
         m->kv_len=0;
         float *logit=step(m,ids,n-1,0);
@@ -625,8 +653,10 @@ static void run_serve(Model *m, const char *snap){
         if(!strcmp(line,"\x02RESET")){
             hist_len=0;
             for(int i=0;i<m->c.n_layers;i++){
-                memset(m->K[i],0,(int64_t)m->c.n_kv_heads*m->max_t*m->c.head_dim*sizeof(float));
-                memset(m->V[i],0,(int64_t)m->c.n_kv_heads*m->max_t*m->c.head_dim*sizeof(float));
+                memset(m->K[i],0,(int64_t)m->c.n_kv_heads*m->max_t*m->c.head_dim*sizeof(int8_t));
+                memset(m->V[i],0,(int64_t)m->c.n_kv_heads*m->max_t*m->c.head_dim*sizeof(int8_t));
+                memset(m->Ks[i],0,(int64_t)m->c.n_kv_heads*m->max_t*sizeof(float));
+                memset(m->Vs[i],0,(int64_t)m->c.n_kv_heads*m->max_t*sizeof(float));
             }
             m->kv_len=0;
             printf("\x01\x01" "END" "\x01\x01\n");
